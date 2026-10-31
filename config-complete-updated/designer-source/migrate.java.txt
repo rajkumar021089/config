@@ -1,0 +1,17 @@
+try {
+      authorize("Administrators");
+      checkToken(input(pipeline, "token"));
+      MigrationResult r =
+          store()
+              .migrate(
+                  input(pipeline, "sourceService"),
+                  input(pipeline, "packagePrefix"),
+                  flag(input(pipeline, "dryRun"), true),
+                  input(pipeline, "planId"),
+                  flag(input(pipeline, "activate"), true));
+      output(pipeline, "result", r.json);
+      output(pipeline, "planId", r.planId);
+      output(pipeline, "migrationStatus", r.status);
+    } catch (Exception e) {
+      throw failure(e);
+    }

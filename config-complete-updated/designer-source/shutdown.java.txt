@@ -1,0 +1,6 @@
+try {
+      authorize("Administrators");
+      registerMenu(false);
+    } catch (Exception e) {
+      throw failure(e);
+    }

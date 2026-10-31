@@ -1,0 +1,120 @@
+try {
+      authorize("Administrators");
+      ConfigStore s = store();
+      String action = input(pipeline, "action"),
+          pkg = input(pipeline, "packageName"),
+          file = input(pipeline, "fileName"),
+          result;
+      if (action == null || action.equals("status")) {
+        ConfigStore.Snapshot snap = s.snapshot();
+        result =
+            "{\"token\":"
+                + q(token())
+                + ",\"environment\":"
+                + q(snap.environment)
+                + ",\"loadedAt\":"
+                + q(snap.loadedAt)
+                + ",\"version\":"
+                + q(snap.version)
+                + ",\"packages\":"
+                + array(s.listPackages())
+                + s.discoveryJson()
+                + "}";
+      } else if (action.equals("files")) {
+        result = "{\"files\":" + array(s.listFiles(pkg)) + "}";
+      } else if (action.equals("read")) {
+        String text = s.read(pkg, file);
+        result = "{\"content\":" + q(text) + ",\"version\":" + q(ConfigStore.hash(text)) + "}";
+      } else if (action.equals("secrets")) {
+        result = s.secretMetadata(pkg);
+      } else {
+        checkToken(input(pipeline, "token"));
+        switch (action) {
+          case "save":
+            result =
+                "{\"version\":"
+                    + q(s.save(pkg, file, input(pipeline, "content"), input(pipeline, "version")))
+                    + ",\"message\":\"Saved. Active cache unchanged.\"}";
+            break;
+          case "create":
+            result =
+                "{\"version\":"
+                    + q(s.save(pkg, file, "# Package configuration\n", "NEW"))
+                    + ",\"message\":\"File created. Cache unchanged.\"}";
+            break;
+          case "saveSecret":
+            s.saveSecret(
+                pkg,
+                file,
+                input(pipeline, "key"),
+                input(pipeline, "handle"),
+                input(pipeline, "secret"),
+                input(pipeline, "version"));
+            output(pipeline, "secret", null);
+            result = "{\"message\":\"Encrypted value saved. Reset cache to activate.\"}";
+            break;
+          // Combined administration action: validate/publish configuration BEFORE clearing service
+          // results.
+          // If configuration validation fails, the catch below reports an error and the built-in
+          // reset is NOT called.
+          case "resetAll":
+            {
+              ConfigStore.Snapshot snap = s.reset();
+              boolean resultsReset = false;
+              try {
+                Service.doInvoke(
+                    "pub.cache.serviceResults", "resetServerCache", IDataFactory.create());
+                resultsReset = true;
+              } catch (Exception resetFailure) {
+                // Configuration already reloaded successfully. Do not falsely report a total
+                // failure
+                // or roll back a live configuration snapshot after service-result invalidation
+                // failed.
+              }
+              String message =
+                  resultsReset
+                      ? "Configuration reloaded; IS service-result caches reset on this node."
+                      : "Configuration reloaded, but IS service-result cache reset failed. Check"
+                            + " built-in service access and the IS server log.";
+              result =
+                  "{\"configurationReloaded\":true,\"serviceResultsReset\":"
+                      + resultsReset
+                      + ",\"version\":"
+                      + q(snap.version)
+                      + ",\"message\":"
+                      + q(message)
+                      + "}";
+              break;
+            }
+          case "reset":
+            ConfigStore.Snapshot snap = s.reset();
+            result = "{\"message\":\"Server cache refreshed\",\"version\":" + q(snap.version) + "}";
+            break;
+          case "migrate":
+            result =
+                s.migrate(
+                        input(pipeline, "sourceService"),
+                        input(pipeline, "packagePrefix"),
+                        flag(input(pipeline, "dryRun"), true),
+                        input(pipeline, "planId"),
+                        flag(input(pipeline, "activate"), true))
+                    .json;
+            break;
+          default:
+            throw new ConfigException("Unknown operation");
+        }
+      }
+      output(pipeline, "result", result);
+    } catch (Exception e) {
+      output(pipeline, "secret", null);
+      if (e instanceof SecurityException) throw failure(e);
+      output(
+          pipeline,
+          "result",
+          "{\"error\":"
+              + q(
+                  e instanceof ConfigException
+                      ? e.getMessage()
+                      : "Operation failed. Check installation, access and key provisioning.")
+              + "}");
+    }

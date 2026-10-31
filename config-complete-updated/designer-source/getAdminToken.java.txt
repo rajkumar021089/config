@@ -1,0 +1,6 @@
+try {
+      authorize("Administrators");
+      output(pipeline, "token", token());
+    } catch (Exception e) {
+      throw failure(e);
+    }

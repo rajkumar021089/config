@@ -1,0 +1,3 @@
+# Package-scoped configuration. Save does not refresh the active cache.
+demo.message=Hello from config
+demo.timeout=30000

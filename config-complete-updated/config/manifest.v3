@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Values version="2.0">
+  <value name="name">config</value>
+  <value name="enabled">yes</value>
+  <value name="system_package">no</value>
+  <value name="version">2.0.0</value>
+  <value name="classloader">package</value>
+  <value name="listACL">Administrators</value>
+  <value name="target_server_version">10.15</value>
+  <value name="description">Visible Java configuration manager with wrapper contract, DSP console and guarded WxConfig migration</value>
+  <record name="startup_services" javaclass="com.wm.util.Values">
+    <null name="config.services:startup" />
+  </record>
+  <record name="shutdown_services" javaclass="com.wm.util.Values">
+    <null name="config.services:shutdown" />
+  </record>
+  <null name="requires" />
+</Values>

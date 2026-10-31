@@ -1,0 +1,10 @@
+try {
+      store();
+      try {
+        registerMenu(true);
+      } catch (Exception e) {
+        System.err.println("config: menu registration unavailable; use /config/index.dsp");
+      }
+    } catch (Exception e) {
+      throw failure(e);
+    }

@@ -1,0 +1,4 @@
+output(pipeline, "name", "config");
+    output(pipeline, "text", "Configuration Management");
+    output(pipeline, "url", "../config/index.dsp");
+    output(pipeline, "target", "configConsole");

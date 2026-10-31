@@ -1,0 +1,1 @@
+package com.wm.data; public class IDataUtil {public static String getString(IDataCursor c,String k){Object v=c.values().get(k);return v==null?null:v.toString();} public static String[] getStringArray(IDataCursor c,String k){return (String[])c.values().get(k);} public static void put(IDataCursor c,String k,Object v){c.values().put(k,v);} }

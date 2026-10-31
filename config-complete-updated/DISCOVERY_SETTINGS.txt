@@ -1,0 +1,10 @@
+Add or update these in your EXISTING packages/config/config/manager.properties; keep environment, globalPackage and encryption settings.
+
+# Discovery settings (case-sensitive folder names on Linux)
+packagePrefix=NBK
+configurationDirectories=Config,config
+commonConfigFiles=wxConfig.cnf,config.cnf
+
+The first commonConfigFiles entry has highest precedence. Each filename must end in .cnf; its -<environment>.cnf override is loaded automatically. Files are not renamed. Exactly one configured directory may exist in each business package; multiple matches raise a validation error. Empty packagePrefix matches all package names. Settings path is the fixed bootstrap packages/config/config/manager.properties, independent of business-package folders.
+
+For a manual correction without deploying the package: replace the config.services Shared Source using designer-source/SHARED_SOURCE.java.txt; replace dispatch body using designer-source/dispatch.java.txt (it supplies discovery metadata to the DSP); save/compile all Java services in that folder. Replace config/pub/console.js and the DSP assets. Add the properties above, reload the config package, Ctrl+F5 the browser, then Reload Configuration on each node. Later discovery settings changes require only Reload Configuration. Existing original WxConfig secrets still require migration.

@@ -1,0 +1,1197 @@
+package config;
+
+import com.wm.app.b2b.server.*;
+import com.wm.data.*;
+import java.io.*;
+import java.lang.reflect.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.*;
+import java.time.Instant;
+import java.util.*;
+import java.util.regex.*;
+import javax.crypto.*;
+import javax.crypto.spec.*;
+
+/** All implementation is visible in Designer: individual Source tabs and Shared Source. */
+public final class services {
+  private static volatile ConfigStore STORE;
+  private static final byte[] TOKEN_KEY = new byte[32];
+
+  static {
+    new SecureRandom().nextBytes(TOKEN_KEY);
+  }
+
+  /** Read one pipeline field and release the cursor immediately. */
+  private static String input(IData p, String key) {
+    IDataCursor c = p.getCursor();
+    try {
+      return IDataUtil.getString(c, key);
+    } finally {
+      c.destroy();
+    }
+  }
+
+  private static void output(IData p, String key, Object value) {
+    IDataCursor c = p.getCursor();
+    try {
+      IDataUtil.put(c, key, value);
+    } finally {
+      c.destroy();
+    }
+  }
+
+  private static boolean flag(String value, boolean fallback) {
+    if (value == null || value.isBlank()) return fallback;
+    if ("true".equalsIgnoreCase(value)) return true;
+    if ("false".equalsIgnoreCase(value)) return false;
+    throw new IllegalArgumentException("Boolean flags must be true, false or blank");
+  }
+
+  /**
+   * Cache API reflection metadata, NOT authorization results. Recheck the caller on each
+   * invocation.
+   */
+  private static final class Authorization {
+    static final Method GET, ALLOW;
+
+    static {
+      try {
+        Class<?> c = Class.forName("com.wm.app.b2b.server.ACLManager");
+        GET = c.getMethod("getGroup", String.class);
+        Method allow = null;
+        for (Method m : c.getMethods())
+          if (m.getName().equals("allow")
+              && m.getParameterCount() == 2
+              && m.getParameterTypes()[0].isAssignableFrom(GET.getReturnType())
+              && m.getParameterTypes()[1].isAssignableFrom(Service.getUser().getClass())) {
+            allow = m;
+            break;
+          }
+        if (allow == null) throw new IllegalStateException("IS ACL API unavailable");
+        ALLOW = allow;
+      } catch (Exception e) {
+        throw new ExceptionInInitializerError("Unable to initialize IS ACL validation");
+      }
+    }
+  }
+
+  private static void authorize(String acl) throws Exception {
+    Object user = Service.getUser();
+    if (user == null) throw new SecurityException("Authentication required");
+    Object group = Authorization.GET.invoke(null, acl);
+    if (group == null || !Boolean.TRUE.equals(Authorization.ALLOW.invoke(null, group, user)))
+      throw new SecurityException("Access denied");
+  }
+
+  private static String username() throws Exception {
+    Object user = Service.getUser();
+    if (user == null) throw new SecurityException();
+    return String.valueOf(user.getClass().getMethod("getName").invoke(user));
+  }
+
+  /**
+   * Initialization is synchronized once. Normal reads touch the volatile reference and immutable
+   * maps.
+   */
+  private static ConfigStore store() throws Exception {
+    ConfigStore s = STORE;
+    if (s == null)
+      synchronized (services.class) {
+        s = STORE;
+        if (s == null) {
+          String explicit = System.getProperty("config.packagesRoot");
+          Path root;
+          if (explicit != null) root = Paths.get(explicit);
+          else {
+            Class<?> server = Class.forName("com.wm.app.b2b.server.Server");
+            Object resources = server.getMethod("getResources").invoke(null);
+            File dir =
+                (File)
+                    resources
+                        .getClass()
+                        .getMethod("getPackageConfigDir", String.class)
+                        .invoke(resources, "config");
+            root = dir.toPath().getParent().getParent();
+          }
+          s = new ConfigStore(root);
+          s.reset();
+          STORE = s;
+        }
+      }
+    return s;
+  }
+
+  private static ServiceException failure(Exception e) {
+    if (e instanceof SecurityException) return new ServiceException("config: access denied");
+    // Do not expose legacy exception messages: they could contain passwords or connection strings.
+    return new ServiceException(
+        "config: "
+            + (e instanceof ConfigException
+                ? e.getMessage()
+                : "Operation failed; check installation, permissions and key provisioning"));
+  }
+
+  public static class ConfigException extends Exception {
+    public ConfigException(String message) {
+      super(message);
+    }
+  }
+
+  public static final class MissingKey extends ConfigException {
+    public MissingKey() {
+      super("Configuration key not found");
+    }
+  }
+
+  private static String q(String s) {
+    if (s == null) return "null";
+    StringBuilder b = new StringBuilder("\"");
+    for (char c : s.toCharArray()) {
+      if (c == '"' || c == '\\') b.append('\\').append(c);
+      else if (c < 32) b.append(String.format("\\u%04x", (int) c));
+      else b.append(c);
+    }
+    return b.append('"').toString();
+  }
+
+  private static String array(Collection<String> values) {
+    StringJoiner j = new StringJoiner(",", "[", "]");
+    for (String v : values) j.add(q(v));
+    return j.toString();
+  }
+
+  private static String mac(String text) throws Exception {
+    Mac m = Mac.getInstance("HmacSHA256");
+    m.init(new SecretKeySpec(TOKEN_KEY, "HmacSHA256"));
+    return Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(m.doFinal(text.getBytes(StandardCharsets.UTF_8)));
+  }
+
+  private static String token() throws Exception {
+    String t = Long.toString(System.currentTimeMillis());
+    return t + "." + mac(username() + "\n" + t);
+  }
+
+  private static void checkToken(String token) throws Exception {
+    if (token == null) throw new SecurityException();
+    String[] p = token.split("\\.", -1);
+    if (p.length != 2) throw new SecurityException();
+    long age;
+    try {
+      age = System.currentTimeMillis() - Long.parseLong(p[0]);
+    } catch (NumberFormatException e) {
+      throw new SecurityException();
+    }
+    if (age < 0
+        || age > 1800000
+        || !MessageDigest.isEqual(
+            mac(username() + "\n" + p[0]).getBytes(StandardCharsets.US_ASCII),
+            p[1].getBytes(StandardCharsets.US_ASCII))) throw new SecurityException();
+  }
+
+  private static void registerMenu(boolean add) throws Exception {
+    IData p = IDataFactory.create();
+    output(p, "callback", "config.services:menu");
+    Service.doInvoke("wm.server.ui", add ? "addSolution" : "removeSolution", p);
+  }
+
+  /** Startup loads saved files without invoking the old WxConfig service. */
+  public static void startup(IData pipeline) throws ServiceException {
+    try {
+      store();
+      try {
+        registerMenu(true);
+      } catch (Exception e) {
+        System.err.println("config: menu registration unavailable; use /config/index.dsp");
+      }
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  public static void shutdown(IData pipeline) throws ServiceException {
+    try {
+      authorize("Administrators");
+      registerMenu(false);
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  public static void menu(IData pipeline) throws ServiceException {
+    output(pipeline, "name", "config");
+    output(pipeline, "text", "Configuration Management");
+    output(pipeline, "url", "../config/index.dsp");
+    output(pipeline, "target", "configConsole");
+  }
+
+  /**
+   * Wrapper contract: input field names match the supplied WxConfig signature; output is
+   * propertyValue.
+   */
+  public static void getValue(IData pipeline) throws ServiceException {
+    try {
+      authorize(System.getProperty("config.runtimeAcl", "Administrators"));
+      // Unsupported interpolation is rejected explicitly, rather than silently changing values.
+      if (flag(input(pipeline, "substituteVariables"), false))
+        throw new ConfigException("substituteVariables=true is outside the agreed scope");
+      flag(input(pipeline, "noVariableInterpolation"), true);
+      ConfigStore s = store();
+      ConfigStore.Snapshot snap = s.snapshot();
+      String value =
+          s.lookup(
+              snap,
+              input(pipeline, "wxConfigPkgName"),
+              input(pipeline, "key"),
+              input(pipeline, "configFile"),
+              flag(input(pipeline, "ignoreGlobalValues"), false),
+              flag(input(pipeline, "scanAllConfigurations"), false),
+              flag(input(pipeline, "showEncryptedValues"), false));
+      output(pipeline, "propertyValue", value);
+    } catch (MissingKey e) {
+      // Suppression applies to a missing key, never to access denial or decryption failure.
+      try {
+        if (flag(input(pipeline, "noServiceException"), false)) {
+          output(pipeline, "propertyValue", null);
+          return;
+        }
+      } catch (Exception invalid) {
+        throw failure(invalid);
+      }
+      throw failure(e);
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  /** Bulk lookup captures one snapshot so all returned values belong to the same version. */
+  public static void getValues(IData pipeline) throws ServiceException {
+    try {
+      authorize(System.getProperty("config.runtimeAcl", "Administrators"));
+      ConfigStore s = store();
+      ConfigStore.Snapshot snap = s.snapshot();
+      IDataCursor c = pipeline.getCursor();
+      String[] keys;
+      try {
+        keys = IDataUtil.getStringArray(c, "keys");
+      } finally {
+        c.destroy();
+      }
+      if (keys == null || keys.length > 1000) throw new ConfigException("Supply at most 1000 keys");
+      IData values = IDataFactory.create();
+      boolean reveal = flag(input(pipeline, "showEncryptedValues"), false);
+      for (String key : keys)
+        output(
+            values,
+            key,
+            s.lookup(
+                snap,
+                input(pipeline, "wxConfigPkgName"),
+                key,
+                null,
+                flag(input(pipeline, "ignoreGlobalValues"), false),
+                false,
+                reveal));
+      output(pipeline, "values", values);
+      output(pipeline, "configurationVersion", snap.version);
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  /** Obtain a short-lived admin token for DSP mutations or the migration command-line tool. */
+  public static void getAdminToken(IData pipeline) throws ServiceException {
+    try {
+      authorize("Administrators");
+      output(pipeline, "token", token());
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  public static void resetServerCache(IData pipeline) throws ServiceException {
+    try {
+      authorize("Administrators");
+      checkToken(input(pipeline, "token"));
+      ConfigStore.Snapshot snap = store().reset();
+      output(pipeline, "configurationVersion", snap.version);
+      output(pipeline, "loadedAt", snap.loadedAt);
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  /** One migration entry point, defaulting to dry run. It never deletes/overwrites legacy files. */
+  public static void migrate(IData pipeline) throws ServiceException {
+    try {
+      authorize("Administrators");
+      checkToken(input(pipeline, "token"));
+      MigrationResult r =
+          store()
+              .migrate(
+                  input(pipeline, "sourceService"),
+                  input(pipeline, "packagePrefix"),
+                  flag(input(pipeline, "dryRun"), true),
+                  input(pipeline, "planId"),
+                  flag(input(pipeline, "activate"), true));
+      output(pipeline, "result", r.json);
+      output(pipeline, "planId", r.planId);
+      output(pipeline, "migrationStatus", r.status);
+    } catch (Exception e) {
+      throw failure(e);
+    }
+  }
+
+  /**
+   * DSP backend. The browser receives metadata and ciphertext/handles; never automatic plaintext
+   * secrets.
+   */
+  public static void dispatch(IData pipeline) throws ServiceException {
+    try {
+      authorize("Administrators");
+      ConfigStore s = store();
+      String action = input(pipeline, "action"),
+          pkg = input(pipeline, "packageName"),
+          file = input(pipeline, "fileName"),
+          result;
+      if (action == null || action.equals("status")) {
+        ConfigStore.Snapshot snap = s.snapshot();
+        result =
+            "{\"token\":"
+                + q(token())
+                + ",\"environment\":"
+                + q(snap.environment)
+                + ",\"loadedAt\":"
+                + q(snap.loadedAt)
+                + ",\"version\":"
+                + q(snap.version)
+                + ",\"packages\":"
+                + array(s.listPackages())
+                + s.discoveryJson()
+                + "}";
+      } else if (action.equals("files")) {
+        result = "{\"files\":" + array(s.listFiles(pkg)) + "}";
+      } else if (action.equals("read")) {
+        String text = s.read(pkg, file);
+        result = "{\"content\":" + q(text) + ",\"version\":" + q(ConfigStore.hash(text)) + "}";
+      } else if (action.equals("secrets")) {
+        result = s.secretMetadata(pkg);
+      } else {
+        checkToken(input(pipeline, "token"));
+        switch (action) {
+          case "save":
+            result =
+                "{\"version\":"
+                    + q(s.save(pkg, file, input(pipeline, "content"), input(pipeline, "version")))
+                    + ",\"message\":\"Saved. Active cache unchanged.\"}";
+            break;
+          case "create":
+            result =
+                "{\"version\":"
+                    + q(s.save(pkg, file, "# Package configuration\n", "NEW"))
+                    + ",\"message\":\"File created. Cache unchanged.\"}";
+            break;
+          case "saveSecret":
+            s.saveSecret(
+                pkg,
+                file,
+                input(pipeline, "key"),
+                input(pipeline, "handle"),
+                input(pipeline, "secret"),
+                input(pipeline, "version"));
+            output(pipeline, "secret", null);
+            result = "{\"message\":\"Encrypted value saved. Reset cache to activate.\"}";
+            break;
+          // Combined administration action: validate/publish configuration BEFORE clearing service
+          // results.
+          // If configuration validation fails, the catch below reports an error and the built-in
+          // reset is NOT called.
+          case "resetAll":
+            {
+              ConfigStore.Snapshot snap = s.reset();
+              boolean resultsReset = false;
+              try {
+                Service.doInvoke(
+                    "pub.cache.serviceResults", "resetServerCache", IDataFactory.create());
+                resultsReset = true;
+              } catch (Exception resetFailure) {
+                // Configuration already reloaded successfully. Do not falsely report a total
+                // failure
+                // or roll back a live configuration snapshot after service-result invalidation
+                // failed.
+              }
+              String message =
+                  resultsReset
+                      ? "Configuration reloaded; IS service-result caches reset on this node."
+                      : "Configuration reloaded, but IS service-result cache reset failed. Check"
+                            + " built-in service access and the IS server log.";
+              result =
+                  "{\"configurationReloaded\":true,\"serviceResultsReset\":"
+                      + resultsReset
+                      + ",\"version\":"
+                      + q(snap.version)
+                      + ",\"message\":"
+                      + q(message)
+                      + "}";
+              break;
+            }
+          case "reset":
+            ConfigStore.Snapshot snap = s.reset();
+            result = "{\"message\":\"Server cache refreshed\",\"version\":" + q(snap.version) + "}";
+            break;
+          case "migrate":
+            result =
+                s.migrate(
+                        input(pipeline, "sourceService"),
+                        input(pipeline, "packagePrefix"),
+                        flag(input(pipeline, "dryRun"), true),
+                        input(pipeline, "planId"),
+                        flag(input(pipeline, "activate"), true))
+                    .json;
+            break;
+          default:
+            throw new ConfigException("Unknown operation");
+        }
+      }
+      output(pipeline, "result", result);
+    } catch (Exception e) {
+      output(pipeline, "secret", null);
+      if (e instanceof SecurityException) throw failure(e);
+      output(
+          pipeline,
+          "result",
+          "{\"error\":"
+              + q(
+                  e instanceof ConfigException
+                      ? e.getMessage()
+                      : "Operation failed. Check installation, access and key provisioning.")
+              + "}");
+    }
+  }
+
+  /** Local JVM configuration engine. No remote server or disk access occurs during lookup. */
+  public static final class ConfigStore {
+    private final Path root;
+    private volatile Snapshot active;
+    private volatile SecretKeySpec encryptionKey;
+    private static final String SECRET_FILE = "config.secrets.cnf", PREFIX = "ENCv1:";
+    private static final Pattern REFERENCE =
+        Pattern.compile("\\[\\[encrypted:([^\\]\\r\\n]+)\\]\\]");
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    // Admin discovery settings are loaded once at startup and refreshed by explicit reload.
+    private volatile Discovery discovery;
+    private static final class Discovery {
+      final String prefix;
+      final List<String> directories, commonFiles;
+      Discovery(Properties settings) throws Exception {
+        prefix = settings.getProperty("packagePrefix", "NBK").trim();
+        if (!prefix.matches("[A-Za-z0-9_]*")) throw new ConfigException("Invalid packagePrefix");
+        directories = entries(settings.getProperty("configurationDirectories", "config,Config"), false);
+        commonFiles = entries(settings.getProperty("commonConfigFiles", "config.cnf,wxConfig.cnf"), true);
+      }
+      static List<String> entries(String value, boolean file) throws Exception {
+        List<String> result = new ArrayList<>();
+        for (String item : value.split(",", -1)) {
+          item = item.trim();
+          if (!item.matches(file ? "[A-Za-z0-9_][A-Za-z0-9_-]*\\.cnf" : "[A-Za-z0-9_][A-Za-z0-9_-]*"))
+            throw new ConfigException("Invalid configuration directory or common filename");
+          if (!result.contains(item)) result.add(item);
+        }
+        return Collections.unmodifiableList(result);
+      }
+    }
+    private Properties managerSettings() throws Exception {
+      Path dir = packageDir("config").resolve("config");
+      if (Files.isSymbolicLink(dir) || !Files.isDirectory(dir))
+        throw new ConfigException("Manager settings directory unavailable");
+      Path settings = dir.resolve("manager.properties");
+      if (Files.isSymbolicLink(settings)) throw new ConfigException("Unsafe manager settings path");
+      return parse(readPath(settings));
+    }
+    private String logicalFile(String filename) {
+      for (String common : discovery.commonFiles) {
+        String stem = common.substring(0, common.length() - 4);
+        if (filename.equalsIgnoreCase(common)) return "config.cnf";
+        if (filename.toLowerCase(Locale.ROOT).startsWith(stem.toLowerCase(Locale.ROOT) + "-"))
+          return "config" + filename.substring(stem.length()).toLowerCase(Locale.ROOT);
+      }
+      return filename.toLowerCase(Locale.ROOT);
+    }
+    public String discoveryJson() {
+      return ",\"packagePrefix\":" + q(discovery.prefix)
+          + ",\"commonConfigFiles\":" + array(discovery.commonFiles);
+    }
+
+    public static final class Snapshot {
+      public final String environment, loadedAt, version, globalPackage;
+      public final Map<String, Map<String, String>> packages, files, secrets, clearSecrets;
+      private final SecretKeySpec key;
+
+      Snapshot(
+          String env,
+          String version,
+          String global,
+          Map<String, Map<String, String>> packages,
+          Map<String, Map<String, String>> files,
+          Map<String, Map<String, String>> secrets,
+          Map<String, Map<String, String>> clear,
+          SecretKeySpec key) {
+        environment = env;
+        loadedAt = Instant.now().toString();
+        this.version = version;
+        globalPackage = global;
+        this.packages = freeze(packages);
+        this.files = freeze(files);
+        this.secrets = freeze(secrets);
+        clearSecrets = freeze(clear);
+        this.key = key;
+      }
+    }
+
+    public ConfigStore(Path root) throws IOException {
+      this.root = root.toRealPath();
+      try { discovery = new Discovery(managerSettings()); } catch (Exception e) { throw new IOException("Cannot load manager discovery settings", e); }
+    }
+
+    private static Map<String, Map<String, String>> freeze(
+        Map<String, Map<String, String>> source) {
+      Map<String, Map<String, String>> result = new HashMap<>();
+      for (Map.Entry<String, Map<String, String>> e : source.entrySet())
+        result.put(e.getKey(), Collections.unmodifiableMap(new HashMap<>(e.getValue())));
+      return Collections.unmodifiableMap(result);
+    }
+
+    private static String name(String name) throws ConfigException {
+      if (name == null || !name.matches("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}") || name.contains(".."))
+        throw new ConfigException("Invalid package name");
+      return name;
+    }
+
+    private Path packageDir(String pkg) throws Exception {
+      Path p = root.resolve(name(pkg));
+      if (Files.isSymbolicLink(p)
+          || !Files.isDirectory(p)
+          || !Files.isRegularFile(p.resolve("manifest.v3"))
+          || !p.toRealPath().getParent().equals(root))
+        throw new ConfigException("Unknown or unsafe package");
+      return p;
+    }
+
+    private Path directory(String pkg) throws Exception {
+      Path parent = packageDir(pkg);
+      Path p = null;
+      for (String folder : discovery.directories) {
+        Path candidate = parent.resolve(folder);
+        if (Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) {
+          if (p != null) throw new ConfigException("Multiple configured directories exist in package " + pkg);
+          p = candidate;
+        }
+      }
+      if (p == null) throw new ConfigException("Package configuration directory unavailable");
+      if (Files.isSymbolicLink(p)
+          || !Files.isDirectory(p)
+          || !p.toRealPath().getParent().equals(packageDir(pkg).toRealPath()))
+        throw new ConfigException("Package config directory unavailable");
+      return p;
+    }
+
+    private Path file(String pkg, String filename, boolean legacy) throws Exception {
+      String pattern =
+          legacy
+              ? "(?i)wxconfig(?:-[A-Za-z0-9_]+)?\\.cnf"
+              : "(?i)(?:(?:wx)?config(?:-[A-Za-z0-9_]+)?\\.cnf|config\\.secrets\\.cnf)";
+      if (filename == null || (!filename.matches(pattern) && !logicalFile(filename).matches("config(?:-[A-Za-z0-9_]+)?\\.cnf")))
+        throw new ConfigException("Unsupported configuration filename");
+      Path p = directory(pkg).resolve(filename);
+      if (Files.isSymbolicLink(p)
+          || (Files.exists(p) && !Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)))
+        throw new ConfigException("Unsafe configuration path");
+      return p;
+    }
+
+    public List<String> listPackages() throws Exception {
+      List<String> result = new ArrayList<>();
+      try (DirectoryStream<Path> ds = Files.newDirectoryStream(root)) {
+        for (Path p : ds)
+          try {
+            // Discover existing business packages; the config manager itself is not a business package.
+            String name = p.getFileName().toString();
+            if (!name.startsWith(discovery.prefix)) continue;
+            packageDir(name);
+            result.add(name);
+          } catch (Exception skip) {
+          }
+      }
+      Collections.sort(result);
+      return result;
+    }
+
+    public List<String> listFiles(String pkg) throws Exception {
+      packageDir(pkg);
+      List<String> result = new ArrayList<>();
+      boolean found = false;
+      for (String folder : discovery.directories) if (Files.exists(root.resolve(pkg).resolve(folder), LinkOption.NOFOLLOW_LINKS)) found = true;
+      if (!found) return result;
+      try (DirectoryStream<Path> ds = Files.newDirectoryStream(directory(pkg))) {
+        for (Path p : ds)
+          try {
+            file(pkg, p.getFileName().toString(), false);
+            result.add(p.getFileName().toString());
+          } catch (Exception skip) {
+          }
+      }
+      Collections.sort(result);
+      return result;
+    }
+
+    private static Properties parse(String text) throws Exception {
+      if (text == null || text.length() > 1048576)
+        throw new ConfigException("Configuration exceeds 1 MiB or is missing");
+      Properties p = new Properties();
+      try {
+        p.load(new StringReader(text));
+      } catch (IllegalArgumentException e) {
+        throw new ConfigException("Invalid properties syntax");
+      }
+      return p;
+    }
+
+    private static String serialize(Properties values) throws IOException {
+      StringWriter w = new StringWriter();
+      values.store(w, "config managed properties");
+      return w.toString();
+    }
+
+    private static Map<String, String> map(Properties p) {
+      Map<String, String> values = new HashMap<>();
+      for (String key : p.stringPropertyNames()) values.put(key, p.getProperty(key));
+      return values;
+    }
+
+    private static String readPath(Path path) throws Exception {
+      if (Files.size(path) > 1048576) throw new ConfigException("Configuration exceeds 1 MiB");
+      return Files.readString(path, StandardCharsets.UTF_8);
+    }
+
+    public String read(String pkg, String filename) throws Exception {
+      return readPath(file(pkg, filename, false));
+    }
+
+    public static String hash(String text) throws Exception {
+      return Base64.getEncoder()
+          .encodeToString(
+              MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String handle(String value) {
+      Matcher m = REFERENCE.matcher(value);
+      return m.matches() ? m.group(1) : null;
+    }
+
+    /** Prepare temporary files first; roll back already-replaced targets if a later move fails. */
+    private static void writeBatch(Map<Path, String> changes) throws Exception {
+      Map<Path, String> old = new LinkedHashMap<>();
+      Map<Path, Path> temporary = new LinkedHashMap<>();
+      List<Path> moved = new ArrayList<>();
+      try {
+        for (Map.Entry<Path, String> e : changes.entrySet()) {
+          Path dest = e.getKey();
+          old.put(dest, Files.exists(dest) ? readPath(dest) : null);
+          Path temp = Files.createTempFile(dest.getParent(), ".config-", ".tmp");
+          temporary.put(dest, temp);
+          try {
+            Files.setPosixFilePermissions(
+                temp, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+          } catch (UnsupportedOperationException windows) {
+          }
+          Files.writeString(temp, e.getValue(), StandardCharsets.UTF_8);
+        }
+        for (Map.Entry<Path, Path> e : temporary.entrySet()) {
+          Files.move(
+              e.getValue(),
+              e.getKey(),
+              StandardCopyOption.ATOMIC_MOVE,
+              StandardCopyOption.REPLACE_EXISTING);
+          moved.add(e.getKey());
+        }
+      } catch (Exception failure) {
+        boolean rollbackFailed = false;
+        for (Path dest : moved)
+          try {
+            String text = old.get(dest);
+            if (text == null) Files.deleteIfExists(dest);
+            else {
+              Path undo = Files.createTempFile(dest.getParent(), ".config-undo-", ".tmp");
+              try {
+                Files.writeString(undo, text, StandardCharsets.UTF_8);
+                Files.move(
+                    undo,
+                    dest,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+              } finally {
+                Files.deleteIfExists(undo);
+              }
+            }
+          } catch (Exception rollback) {
+            rollbackFailed = true;
+          }
+        throw new ConfigException(
+            rollbackFailed
+                ? "Write failed and rollback incomplete; restore from backup"
+                : "Write failed; changed targets rolled back");
+      } finally {
+        for (Path temp : temporary.values()) Files.deleteIfExists(temp);
+      }
+    }
+
+    /** Save changes disk only. Never assign active or call reset here. */
+    public synchronized String save(String pkg, String filename, String text, String expected)
+        throws Exception {
+      Properties values = parse(text);
+      Path path = file(pkg, filename, false);
+      if (SECRET_FILE.equals(filename))
+        for (String v : values.stringPropertyNames())
+          if (!values.getProperty(v).startsWith(PREFIX))
+            throw new ConfigException("Secret store accepts encrypted entries only");
+      String actual = Files.exists(path) ? hash(readPath(path)) : "NEW";
+      if (!Objects.equals(expected, actual))
+        throw new ConfigException("File changed; reopen before saving");
+      writeBatch(Collections.singletonMap(path, text));
+      return hash(text);
+    }
+
+    public synchronized void saveSecret(
+        String pkg, String filename, String key, String secretHandle, String plain, String expected)
+        throws Exception {
+      if (SECRET_FILE.equals(filename) || key == null || key.isBlank() || plain == null)
+        throw new ConfigException("Select a normal config file and supply key/value");
+      if (secretHandle == null || secretHandle.isBlank()) secretHandle = key;
+      if (secretHandle.contains("]") || secretHandle.contains("\n") || secretHandle.contains("\r"))
+        throw new ConfigException("Invalid secret handle");
+      Path target = file(pkg, filename, false);
+      String text = readPath(target);
+      if (!Objects.equals(expected, hash(text)))
+        throw new ConfigException("File changed; reopen before saving");
+      Properties p = parse(text);
+      p.setProperty(key, "[[encrypted:" + secretHandle + "]]");
+      Path secretPath = file(pkg, SECRET_FILE, false);
+      Properties secrets =
+          Files.exists(secretPath) ? parse(readPath(secretPath)) : new Properties();
+      secrets.setProperty(secretHandle, encrypt(pkg, secretHandle, plain));
+      Map<Path, String> changes = new LinkedHashMap<>();
+      changes.put(secretPath, serialize(secrets));
+      changes.put(target, serialize(p));
+      writeBatch(changes);
+    }
+
+    /** Cache the provisioned key once. Runtime decryption never reads its file or environment. */
+    private SecretKeySpec key() throws Exception {
+      SecretKeySpec found = encryptionKey;
+      if (found != null) return found;
+      synchronized (this) {
+        found = encryptionKey;
+        if (found != null) return found;
+        String encoded = System.getenv("CONFIG_MASTER_KEY");
+        if (encoded == null || encoded.isBlank()) {
+          String location = System.getProperty("config.masterKeyFile");
+          if (location == null)
+            throw new ConfigException("Provision CONFIG_MASTER_KEY or config.masterKeyFile");
+          Path p = Paths.get(location);
+          if (!p.isAbsolute() || p.toRealPath().startsWith(root))
+            throw new ConfigException("Key file must be outside packages");
+          encoded = Files.readString(p, StandardCharsets.US_ASCII).trim();
+        }
+        byte[] bytes;
+        try {
+          bytes = Base64.getDecoder().decode(encoded);
+        } catch (IllegalArgumentException e) {
+          throw new ConfigException("Invalid master key encoding");
+        }
+        if (bytes.length != 32) throw new ConfigException("Master key must contain 32 bytes");
+        found = new SecretKeySpec(bytes, "AES");
+        encryptionKey = found;
+        return found;
+      }
+    }
+
+    public String encrypt(String pkg, String handle, String plain) throws Exception {
+      packageDir(pkg);
+      byte[] iv = new byte[12];
+      RANDOM.nextBytes(iv);
+      Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+      c.init(Cipher.ENCRYPT_MODE, key(), new GCMParameterSpec(128, iv));
+      c.updateAAD((pkg + "\n" + handle).getBytes(StandardCharsets.UTF_8));
+      return PREFIX
+          + Base64.getEncoder().encodeToString(iv)
+          + ":"
+          + Base64.getEncoder().encodeToString(c.doFinal(plain.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String decrypt(SecretKeySpec key, String pkg, String handle, String cipher)
+        throws Exception {
+      try {
+        if (key == null || !cipher.startsWith(PREFIX)) throw new GeneralSecurityException();
+        String[] p = cipher.substring(PREFIX.length()).split(":", -1);
+        if (p.length != 2) throw new GeneralSecurityException();
+        byte[] iv = Base64.getDecoder().decode(p[0]);
+        if (iv.length != 12) throw new GeneralSecurityException();
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+        c.updateAAD((pkg + "\n" + handle).getBytes(StandardCharsets.UTF_8));
+        return new String(c.doFinal(Base64.getDecoder().decode(p[1])), StandardCharsets.UTF_8);
+      } catch (Exception e) {
+        throw new ConfigException("Secret resolution failed; verify key, package and handle");
+      }
+    }
+
+    /** Load and validate privately, then one volatile assignment publishes the complete version. */
+    public synchronized Snapshot reset() throws Exception {
+      Discovery previous = discovery;
+      Properties settings = managerSettings();
+      discovery = new Discovery(settings);
+      try { return loadSnapshot(settings); }
+      catch (Exception failure) { discovery = previous; throw failure; }
+    }
+    private Snapshot loadSnapshot(Properties settings) throws Exception {
+      String env = settings.getProperty("environment", "dev");
+      if (!env.matches("[A-Za-z0-9_]+")) throw new ConfigException("Invalid environment");
+      boolean cacheClear = flag(settings.getProperty("cacheDecryptedSecrets"), false);
+      String global = settings.getProperty("globalPackage", "");
+      Map<String, Map<String, String>> packages = new HashMap<>(),
+          files = new HashMap<>(),
+          secrets = new HashMap<>(),
+          clear = new HashMap<>();
+      StringBuilder fingerprint = new StringBuilder(env + "\n" + global + "\n");
+      SecretKeySpec key = null;
+      // Startup and explicit reload share this disk-to-memory path. Never scan on getValue.
+      List<String> loadPackages = new ArrayList<>(listPackages());
+      // Preserve an explicitly configured common fallback, even if outside the NBK prefix.
+      if (!global.isEmpty() && !loadPackages.contains(global)) {
+        packageDir(global);
+        loadPackages.add(global);
+      }
+      for (String pkg : loadPackages) {
+        List<String> names = listFiles(pkg);
+        Map<String, String> effective = new HashMap<>();
+        // Read legacy files first so a new config.cnf takes precedence if both exist.
+        names.sort(Comparator.comparingInt((String n) -> {
+          for (int i = 0; i < discovery.commonFiles.size(); i++) {
+            String common = discovery.commonFiles.get(i);
+            String stem = common.substring(0, common.length() - 4);
+            if (n.equalsIgnoreCase(common) || n.toLowerCase(Locale.ROOT).startsWith(stem.toLowerCase(Locale.ROOT) + "-"))
+              return -i;
+          }
+          return 1;
+        }).thenComparing(n -> n));
+        for (String filename : names)
+          if (!filename.equals(SECRET_FILE)) {
+            String text = read(pkg, filename);
+            Map<String, String> values = map(parse(text));
+            String logical = logicalFile(filename);
+            files.put(pkg + "/" + logical, values);
+            fingerprint
+                .append(pkg)
+                .append('/')
+                .append(filename)
+                .append(':')
+                .append(hash(text))
+                .append('\n');
+            if (logical.equals("config.cnf")) effective.putAll(values);
+          }
+        Map<String, String> overrides = files.get(pkg + "/config-" + env + ".cnf");
+        if (overrides != null) effective.putAll(overrides);
+        packages.put(pkg, effective);
+        if (names.contains(SECRET_FILE)) {
+          String text = read(pkg, SECRET_FILE);
+          Map<String, String> stored = map(parse(text));
+          secrets.put(pkg, stored);
+          fingerprint.append(pkg).append("/secrets:").append(hash(text)).append('\n');
+          if (!stored.isEmpty()) key = key();
+          Map<String, String> decoded = new HashMap<>();
+          for (Map.Entry<String, String> e : stored.entrySet()) {
+            String value = decrypt(key, pkg, e.getKey(), e.getValue());
+            if (cacheClear) decoded.put(e.getKey(), value);
+          }
+          if (cacheClear) clear.put(pkg, decoded);
+        }
+        for (Map<String, String> values : Arrays.asList(effective))
+          for (String value : values.values()) {
+            String ref = handle(value);
+            if (ref != null && !secrets.getOrDefault(pkg, Collections.emptyMap()).containsKey(ref))
+              throw new ConfigException("Unresolved secret reference in package " + pkg);
+            if (value.contains("[[encrypted:") && ref == null)
+              throw new ConfigException("Embedded/malformed secret reference in package " + pkg);
+          }
+      }
+      Snapshot next =
+          new Snapshot(
+              env, hash(fingerprint.toString()), global, packages, files, secrets, clear, key);
+      active = next;
+      return next;
+    }
+
+    public Snapshot snapshot() throws ConfigException {
+      Snapshot s = active;
+      if (s == null) throw new ConfigException("Cache not initialized");
+      return s;
+    }
+
+    /**
+     * Memory-only lookup. No synchronized block, filesystem call, regex on ordinary values, or
+     * network call.
+     */
+    public String lookup(
+        Snapshot s,
+        String pkg,
+        String key,
+        String configFile,
+        boolean ignoreGlobal,
+        boolean scanAll,
+        boolean showEncrypted)
+        throws Exception {
+      if (key == null || key.isEmpty()) throw new ConfigException("key is required");
+      String selected = configFile == null ? null : logicalFile(configFile);
+      if (selected != null && !selected.isBlank()) {
+        if (selected.startsWith("wxconfig"))
+          selected = "config" + selected.substring("wxconfig".length());
+        if (!selected.matches("config(?:-[A-Za-z0-9_]+)?\\.cnf"))
+          throw new ConfigException("configFile accepts a supported basename only");
+      } else selected = null;
+      String owner = pkg, value = null;
+      if (pkg != null && !pkg.isBlank())
+        value =
+            (selected == null
+                    ? s.packages.getOrDefault(pkg, Collections.emptyMap())
+                    : s.files.getOrDefault(pkg + "/" + selected, Collections.emptyMap()))
+                .get(key);
+      if (value == null && !ignoreGlobal && !s.globalPackage.isEmpty()) {
+        owner = s.globalPackage;
+        value = s.packages.getOrDefault(owner, Collections.emptyMap()).get(key);
+      }
+      if (value == null && scanAll) {
+        owner = null;
+        for (String candidate : new TreeSet<>(s.packages.keySet())) {
+          String possible = s.packages.get(candidate).get(key);
+          if (possible != null) {
+            if (owner != null) throw new ConfigException("Ambiguous key across packages");
+            owner = candidate;
+            value = possible;
+          }
+        }
+      }
+      if (value == null) throw new MissingKey();
+      if (!value.startsWith("[[encrypted:")) return value;
+      String ref = handle(value);
+      if (ref == null) throw new ConfigException("Malformed encrypted reference");
+      if (!showEncrypted) return value;
+      String clear = s.clearSecrets.getOrDefault(owner, Collections.emptyMap()).get(ref);
+      if (clear != null) return clear;
+      String encrypted = s.secrets.getOrDefault(owner, Collections.emptyMap()).get(ref);
+      if (encrypted == null) throw new ConfigException("Encrypted handle missing");
+      return decrypt(s.key, owner, ref, encrypted);
+    }
+
+    private String secretMetadata(String pkg) throws Exception {
+      Map<String, String> stored = snapshot().secrets.getOrDefault(pkg, Collections.emptyMap());
+      return "{\"handles\":" + array(new TreeSet<>(stored.keySet())) + "}";
+    }
+
+    /**
+     * One-environment migration: common and active environment files; other stage files are
+     * reported.
+     */
+    public synchronized MigrationResult migrate(
+        String sourceService,
+        String packagePrefix,
+        boolean dryRun,
+        String expectedPlan,
+        boolean activate)
+        throws Exception {
+      if (sourceService == null
+          || !sourceService.matches("[A-Za-z0-9_.$]+:[A-Za-z0-9_$]+")
+          || sourceService.startsWith("config."))
+        throw new ConfigException("Supply the original WxConfig namespace:service");
+      String prefix = packagePrefix == null ? "NBK" : packagePrefix;
+      if (!prefix.matches("[A-Za-z0-9_]*")) throw new ConfigException("Invalid package prefix");
+      String env = snapshot().environment;
+      List<MigrationFile> plan = new ArrayList<>();
+      List<String> skipped = new ArrayList<>(), conflicts = new ArrayList<>();
+      StringBuilder identity = new StringBuilder(sourceService + "\n" + env + "\n");
+      int keys = 0, refs = 0;
+      for (String pkg : listPackages())
+        if (pkg.startsWith(prefix) && !pkg.equals("config")) {
+          if (!Files.isDirectory(root.resolve(pkg).resolve("config"))) continue;
+          try (DirectoryStream<Path> ds =
+              Files.newDirectoryStream(directory(pkg), "wxconfig*.cnf")) {
+            List<String> names = new ArrayList<>();
+            for (Path f : ds) names.add(f.getFileName().toString());
+            Collections.sort(names);
+            for (String legacy : names) {
+              Path source = file(pkg, legacy, true);
+              if (!legacy.equals("wxconfig.cnf") && !legacy.equals("wxconfig-" + env + ".cnf")) {
+                skipped.add(pkg + "/" + legacy);
+                continue;
+              }
+              String text = readPath(source);
+              Properties values = parse(text);
+              String target = "config" + legacy.substring("wxconfig".length());
+              Path dest = file(pkg, target, false);
+              if (Files.exists(dest)) conflicts.add(pkg + "/" + target);
+              identity
+                  .append(pkg)
+                  .append('/')
+                  .append(legacy)
+                  .append(':')
+                  .append(hash(text))
+                  .append('\n');
+              keys += values.size();
+              for (String k : values.stringPropertyNames()) {
+                String v = values.getProperty(k);
+                if (handle(v) != null) refs++;
+                else if (v.contains("[[encrypted:"))
+                  throw new ConfigException(
+                      "Embedded/malformed legacy secret reference; package " + pkg);
+                if (v.contains("${"))
+                  throw new ConfigException(
+                      "Interpolation found in " + pkg + "; excluded from agreed scope");
+              }
+              plan.add(new MigrationFile(pkg, legacy, target, values));
+            }
+          }
+        }
+      String id = hash(identity.toString());
+      if (plan.isEmpty())
+        throw new ConfigException("No matching common/active-environment wxconfig files found");
+      String status = dryRun ? "DRY_RUN" : "APPLIED";
+      if (!dryRun) {
+        if (!id.equals(expectedPlan))
+          throw new ConfigException("Migration plan changed or missing; run dry run again");
+        if (!conflicts.isEmpty())
+          throw new ConfigException(
+              "Destination files already exist; migration refuses to overwrite them");
+        Map<Path, String> changes = new LinkedHashMap<>();
+        Map<String, Properties> secretStores = new HashMap<>();
+        int split = sourceService.lastIndexOf(':');
+        // Resolve ALL legacy secrets before writing ANY destination file.
+        for (MigrationFile item : plan) {
+          Properties migrated = new Properties();
+          migrated.putAll(item.values);
+          for (String k : item.values.stringPropertyNames()) {
+            String ref = handle(item.values.getProperty(k));
+            if (ref == null) continue;
+            String plaintext;
+            try {
+              IData request = IDataFactory.create();
+              output(request, "key", k);
+              output(request, "wxConfigPkgName", item.pkg);
+              output(request, "configFile", item.source);
+              output(request, "showEncryptedValues", "true");
+              output(request, "noVariableInterpolation", "true");
+              output(request, "ignoreGlobalValues", "true");
+              output(request, "noServiceException", "false");
+              output(request, "scanAllConfigurations", "false");
+              output(request, "substituteVariables", "false");
+              IData response =
+                  Service.doInvoke(
+                      sourceService.substring(0, split),
+                      sourceService.substring(split + 1),
+                      request);
+              plaintext = input(response, "propertyValue");
+              output(request, "propertyValue", null);
+              output(response, "propertyValue", null);
+              if (plaintext == null || plaintext.contains("[[encrypted:"))
+                throw new ConfigException("Legacy service did not resolve encrypted value");
+            } catch (Exception legacyError) {
+              throw new ConfigException(
+                  "Legacy secret resolution failed in package " + item.pkg + "; no values written");
+            }
+            Properties targetSecrets = secretStores.get(item.pkg);
+            if (targetSecrets == null) {
+              Path secretPath = file(item.pkg, SECRET_FILE, false);
+              if (Files.exists(secretPath))
+                throw new ConfigException(
+                    "Destination secret store already exists; refusing merge");
+              targetSecrets = new Properties();
+              secretStores.put(item.pkg, targetSecrets);
+            }
+            // A handle reused by two keys must resolve to the same plaintext.
+            String previous = targetSecrets.getProperty(ref);
+            if (previous != null && !decrypt(key(), item.pkg, ref, previous).equals(plaintext))
+              throw new ConfigException("Conflicting legacy handle in package " + item.pkg);
+            targetSecrets.setProperty(ref, encrypt(item.pkg, ref, plaintext));
+            plaintext = null;
+          }
+          changes.put(file(item.pkg, item.target, false), serialize(migrated));
+        }
+        for (Map.Entry<String, Properties> e : secretStores.entrySet())
+          changes.put(file(e.getKey(), SECRET_FILE, false), serialize(e.getValue()));
+        writeBatch(changes);
+        if (activate)
+          try {
+            reset();
+          } catch (Exception invalid) {
+            boolean clean = true;
+            for (Path path : changes.keySet())
+              try {
+                Files.deleteIfExists(path);
+              } catch (Exception cleanup) {
+                clean = false;
+              }
+            throw new ConfigException(
+                clean
+                    ? "Activation failed; newly migrated files removed, old cache retained"
+                    : "Activation failed; cleanup incomplete, review migrated files");
+          }
+      }
+      List<String> destinations = new ArrayList<>();
+      for (MigrationFile f : plan) destinations.add(f.pkg + "/config/" + f.target);
+      String json =
+          "{\"status\":"
+              + q(status)
+              + ",\"planId\":"
+              + q(id)
+              + ",\"environment\":"
+              + q(env)
+              + ",\"files\":"
+              + array(destinations)
+              + ",\"keyCount\":"
+              + keys
+              + ",\"secretReferences\":"
+              + refs
+              + ",\"conflicts\":"
+              + array(conflicts)
+              + ",\"skippedOtherStages\":"
+              + array(skipped)
+              + ",\"activated\":"
+              + (!dryRun && activate)
+              + "}";
+      return new MigrationResult(id, status, json);
+    }
+  }
+
+  private static final class MigrationFile {
+    final String pkg, source, target;
+    final Properties values;
+
+    MigrationFile(String pkg, String source, String target, Properties values) {
+      this.pkg = pkg;
+      this.source = source;
+      this.target = target;
+      this.values = values;
+    }
+  }
+
+  public static final class MigrationResult {
+    public final String planId, status, json;
+
+    MigrationResult(String plan, String status, String json) {
+      planId = plan;
+      this.status = status;
+      this.json = json;
+    }
+  }
+}

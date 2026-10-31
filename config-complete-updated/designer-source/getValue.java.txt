@@ -1,0 +1,32 @@
+try {
+      authorize(System.getProperty("config.runtimeAcl", "Administrators"));
+      // Unsupported interpolation is rejected explicitly, rather than silently changing values.
+      if (flag(input(pipeline, "substituteVariables"), false))
+        throw new ConfigException("substituteVariables=true is outside the agreed scope");
+      flag(input(pipeline, "noVariableInterpolation"), true);
+      ConfigStore s = store();
+      ConfigStore.Snapshot snap = s.snapshot();
+      String value =
+          s.lookup(
+              snap,
+              input(pipeline, "wxConfigPkgName"),
+              input(pipeline, "key"),
+              input(pipeline, "configFile"),
+              flag(input(pipeline, "ignoreGlobalValues"), false),
+              flag(input(pipeline, "scanAllConfigurations"), false),
+              flag(input(pipeline, "showEncryptedValues"), false));
+      output(pipeline, "propertyValue", value);
+    } catch (MissingKey e) {
+      // Suppression applies to a missing key, never to access denial or decryption failure.
+      try {
+        if (flag(input(pipeline, "noServiceException"), false)) {
+          output(pipeline, "propertyValue", null);
+          return;
+        }
+      } catch (Exception invalid) {
+        throw failure(invalid);
+      }
+      throw failure(e);
+    } catch (Exception e) {
+      throw failure(e);
+    }

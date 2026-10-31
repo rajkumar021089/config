@@ -1,0 +1,9 @@
+try {
+      authorize("Administrators");
+      checkToken(input(pipeline, "token"));
+      ConfigStore.Snapshot snap = store().reset();
+      output(pipeline, "configurationVersion", snap.version);
+      output(pipeline, "loadedAt", snap.loadedAt);
+    } catch (Exception e) {
+      throw failure(e);
+    }

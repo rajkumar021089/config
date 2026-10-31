@@ -1,0 +1,31 @@
+try {
+      authorize(System.getProperty("config.runtimeAcl", "Administrators"));
+      ConfigStore s = store();
+      ConfigStore.Snapshot snap = s.snapshot();
+      IDataCursor c = pipeline.getCursor();
+      String[] keys;
+      try {
+        keys = IDataUtil.getStringArray(c, "keys");
+      } finally {
+        c.destroy();
+      }
+      if (keys == null || keys.length > 1000) throw new ConfigException("Supply at most 1000 keys");
+      IData values = IDataFactory.create();
+      boolean reveal = flag(input(pipeline, "showEncryptedValues"), false);
+      for (String key : keys)
+        output(
+            values,
+            key,
+            s.lookup(
+                snap,
+                input(pipeline, "wxConfigPkgName"),
+                key,
+                null,
+                flag(input(pipeline, "ignoreGlobalValues"), false),
+                false,
+                reveal));
+      output(pipeline, "values", values);
+      output(pipeline, "configurationVersion", snap.version);
+    } catch (Exception e) {
+      throw failure(e);
+    }
