@@ -1,0 +1,49 @@
+Config 2.3.3 menu-navigation patch, revision 233-nav2
+
+Apply this revision instead of the earlier console.js-only navigation patch.
+
+INSTALL
+1. Back up the existing packages/config/pub folder.
+2. Copy ALL files from this archive's config/pub folder into your existing
+   Integration Server instance's packages/config/pub folder, replacing matching
+   files. Include the NEW console-bootstrap.js. Do not replace the entire
+   package with this patch.
+3. Open /config/packages.dsp on the same IS and use Ctrl+F5.
+4. In browser DevTools, choose Network -> All and clear any text filter.
+   The expected sequence is:
+     packages.dsp
+     console-bootstrap.js?v=233-nav2
+     console.js?v=233-nav2
+     POST /invoke/config.services/dispatch   form field action=status
+5. Click Packages -> Files -> Packages several times. Confirm the package list
+   returns and the status request is sent on each full navigation.
+
+Only pub assets are included. This patch does not contain Java service,
+configuration data, encrypted-store, or master-key changes.
+No Java recompilation is required for these files.
+Paths and dispatch target assume the existing package name is config.
+
+WHAT CHANGED
+- All six DSP entry pages load a versioned bootstrap and console script.
+- Startup waits for the document, catches initialization failures, and reports
+  missing page controls or failed console.js loads visibly.
+- Handlers for controls belonging to other pages are bound only if present.
+- Local console links request a complete document; modified clicks still work.
+- Re-evaluating the same console script does not redeclare global variables or
+  duplicate successful startup requests.
+- A persisted pageshow requests status again when a page is restored.
+
+DIAGNOSIS AND LIMITS
+The earlier patch attaches handlers to controls before status/dispatch and
+outside its startup error handler. A missing unrelated control reproduces the
+reported no-dispatch symptom in local execution. This does not establish the
+exact error on the target server. Script loading/caching or the surrounding
+navigation shell can also prevent startup.
+
+If the symptom remains, capture the first red browser Console error and the
+Network responses for both JavaScript files. If dispatch appears, capture its
+HTTP status and response instead. Do not include passwords or token values.
+
+ROLLBACK
+Restore the backed-up pub files, remove console-bootstrap.js if it did not
+previously exist, then hard-refresh the page.

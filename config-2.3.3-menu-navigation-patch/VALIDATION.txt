@@ -1,0 +1,26 @@
+Config 2.3.3 navigation patch 233-nav2
+
+JavaScript syntax checks: passed for console.js and console-bootstrap.js.
+Local integration checks: 15 passed.
+
+Method: actual JavaScript executed with Node vm, parsed DSP element fixtures,
+and simulated dispatch responses. No browser executable was available.
+The customer's browser, IS DSP rendering, ACLs, and live services have NOT
+been tested. These results do not establish production compatibility.
+
+Passed checks:
+1. Earlier patch reproduces a pre-dispatch error with an unrelated control absent.
+2. Updated Packages startup tolerates that absent unrelated control.
+3. Ten alternating Packages/Files page loads each issue a status request.
+4. Local links assign a full-document URL; modified clicks are preserved.
+5. Package selection, file read, save content/version/token parameters are preserved.
+6. Encrypted entry update clears its password input after the simulated save.
+7. Reset button issues resetAll and then status.
+8. Index and migration entry pages initialize.
+9. Script re-evaluation avoids duplicate successful startup requests.
+10. Persisted pageshow refreshes status.
+11. Bootstrap waits for DOMContentLoaded.
+12. Missing required controls display a diagnostic.
+13. A console.js load failure displays a diagnostic.
+14. A console.js parse failure displays a diagnostic.
+15. A dispatch HTTP failure displays its error.
