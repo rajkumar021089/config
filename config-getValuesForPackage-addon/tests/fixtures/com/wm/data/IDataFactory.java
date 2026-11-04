@@ -1,0 +1,1 @@
+package com.wm.data; public class IDataFactory {public static IData create(){final java.util.Map<String,Object> m=new java.util.HashMap<>();return ()->new IDataCursor(){public void destroy(){}public java.util.Map<String,Object> values(){return m;}};} }

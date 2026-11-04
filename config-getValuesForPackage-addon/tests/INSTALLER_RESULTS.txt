@@ -1,0 +1,11 @@
+PASS installer check mode performs no writes
+PASS installer merges new method and preserves local Java changes
+PASS existing Java source content is otherwise unchanged
+PASS installer adds both namespace files
+PASS installer preserves config/manager.properties
+PASS installer preserves pub/console.js
+PASS installer backup retains complete original source
+PASS reinstall is idempotent and creates no extra backup
+PASS metadata conflict is rejected before modifying Java source
+PASS installer rejects an unrecognized renamed package without writes
+TOTAL 10 installer checks passed

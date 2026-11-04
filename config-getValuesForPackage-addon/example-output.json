@@ -1,0 +1,39 @@
+{
+  "packageName": "NBKCustomer",
+  "contents": [
+    {
+      "package": "NBKCustomer",
+      "key": "timeout",
+      "value": "60000",
+      "valueList": [
+        "60000"
+      ],
+      "variable": "false",
+      "isGlobalValue": "false",
+      "containsUnresolvedInterpolator": "false",
+      "files": [
+        {
+          "fileName": "config.cnf",
+          "value": "30000",
+          "isActive": "true",
+          "isEffective": "false"
+        },
+        {
+          "fileName": "config-dev.cnf",
+          "value": "60000",
+          "isActive": "true",
+          "isEffective": "true"
+        }
+      ]
+    }
+  ],
+  "keyValues": [
+    {
+      "key": "timeout",
+      "value": "60000"
+    }
+  ],
+  "totalCount": "1",
+  "environment": "dev",
+  "configurationVersion": "<snapshot-version>"
+}

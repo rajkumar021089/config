@@ -1,0 +1,1 @@
+package com.wm.app.b2b.server; public class ACLManager {public static class ACLGroup{} public static ACLGroup getGroup(String name){return new ACLGroup();} public static boolean allow(ACLGroup group,User user){return user.getName().equals("Administrator");} }

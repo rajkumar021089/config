@@ -1,0 +1,114 @@
+    try {
+      authorize(System.getProperty("config.runtimeAcl", "Administrators"));
+      String pkg = input(pipeline, "packageName");
+      String alias = input(pipeline, "showPkg");
+      pkg = pkg == null ? "" : pkg.trim();
+      alias = alias == null ? "" : alias.trim();
+      if (pkg.isEmpty()) pkg = alias;
+      else if (!alias.isEmpty() && !pkg.equals(alias))
+        throw new ConfigException("packageName and showPkg must identify the same package");
+      if (pkg.isEmpty()) throw new ConfigException("packageName is required");
+      if (!pkg.matches("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}") || pkg.contains(".."))
+        throw new ConfigException("Invalid package name");
+      boolean includeGlobal = flag(input(pipeline, "includeGlobalValues"), false);
+      boolean reveal = flag(input(pipeline, "showEncryptedValues"), false);
+      String[] ignored;
+      IDataCursor in = pipeline.getCursor();
+      try {
+        ignored = IDataUtil.getStringArray(in, "ignoreKeysStartingWith");
+      } finally {
+        in.destroy();
+      }
+
+      // Capture exactly one immutable version. No directory scan or file read on this path
+      // after the existing store has initialized at startup (or its first invocation).
+      ConfigStore s = store();
+      ConfigStore.Snapshot snap = s.snapshot();
+      Map<String, String> local = snap.packages.get(pkg);
+      if (local == null)
+        throw new ConfigException("Package is not loaded in the configuration snapshot");
+      Map<String, String> global = includeGlobal
+          ? snap.packages.getOrDefault(snap.globalPackage, Collections.emptyMap())
+          : Collections.emptyMap();
+      SortedSet<String> keys = new TreeSet<>(local.keySet());
+      keys.addAll(global.keySet());
+
+      // Cache the selected owners' logical source maps once for this response.
+      // Snapshot filenames follow the same normalization as existing getValue lookups.
+      Map<String, SortedMap<String, Map<String, String>>> sources = new HashMap<>();
+      sources.put(pkg, new TreeMap<>());
+      if (includeGlobal && !snap.globalPackage.isEmpty())
+        sources.putIfAbsent(snap.globalPackage, new TreeMap<>());
+      for (Map.Entry<String, Map<String, String>> file : snap.files.entrySet()) {
+        int slash = file.getKey().indexOf('/');
+        if (slash < 0) continue;
+        SortedMap<String, Map<String, String>> selected =
+            sources.get(file.getKey().substring(0, slash));
+        if (selected != null) selected.put(file.getKey().substring(slash + 1), file.getValue());
+      }
+
+      List<IData> contents = new ArrayList<>();
+      List<IData> keyValues = new ArrayList<>();
+      String environmentFile = "config-" + snap.environment + ".cnf";
+      for (String key : keys) {
+        boolean skip = false;
+        if (ignored != null)
+          for (String prefix : ignored)
+            if (prefix != null && !prefix.isEmpty() && key.startsWith(prefix)) {
+              skip = true;
+              break;
+            }
+        if (skip) continue;
+        String owner = local.containsKey(key) ? pkg : snap.globalPackage;
+        String raw = snap.packages.get(owner).get(key);
+        // A diagnostic listing must preserve malformed/missing markers by default.
+        // Explicit plaintext requests use the existing fail-closed secret resolver.
+        String value = reveal && raw.contains("[[encrypted:")
+            ? s.lookup(snap, owner, key, null, true, false, true) : raw;
+        SortedMap<String, Map<String, String>> ownerFiles = sources.get(owner);
+        Map<String, String> base = ownerFiles.getOrDefault("config.cnf", Collections.emptyMap());
+        Map<String, String> overrides = ownerFiles.getOrDefault(environmentFile, Collections.emptyMap());
+        String winningFile = overrides.containsKey(key) ? environmentFile
+            : base.containsKey(key) ? "config.cnf" : "";
+        List<IData> fileRows = new ArrayList<>();
+        for (Map.Entry<String, Map<String, String>> file : ownerFiles.entrySet()) {
+          if (!file.getValue().containsKey(key)) continue;
+          IData source = IDataFactory.create();
+          output(source, "fileName", file.getKey());
+          // Source values describe the stored property, so encrypted references stay references.
+          output(source, "value", file.getValue().get(key));
+          output(source, "isActive", Boolean.toString(file.getKey().equals("config.cnf")
+              || file.getKey().equals(environmentFile)));
+          output(source, "isEffective", Boolean.toString(file.getKey().equals(winningFile)));
+          fileRows.add(source);
+        }
+
+        IData row = IDataFactory.create();
+        output(row, "package", owner);
+        output(row, "key", key);
+        output(row, "value", value);
+        // The current properties store has scalar values. Do not split commas/newlines.
+        output(row, "valueList", new String[] {value});
+        // This engine does not evaluate ${...}; retained expressions remain unresolved.
+        output(row, "variable", Boolean.toString(raw.contains("${")));
+        output(row, "isGlobalValue", Boolean.toString(!snap.globalPackage.isEmpty()
+            && owner.equals(snap.globalPackage)));
+        output(row, "containsUnresolvedInterpolator", Boolean.toString(raw.contains("${")));
+        output(row, "files", fileRows.toArray(new IData[0]));
+        contents.add(row);
+        IData pair = IDataFactory.create();
+        output(pair, "key", key);
+        output(pair, "value", value);
+        keyValues.add(pair);
+      }
+
+      // Publish complete, detached response documents only after every value succeeds.
+      output(pipeline, "packageName", pkg);
+      output(pipeline, "contents", contents.toArray(new IData[0]));
+      output(pipeline, "keyValues", keyValues.toArray(new IData[0]));
+      output(pipeline, "totalCount", Integer.toString(contents.size()));
+      output(pipeline, "environment", snap.environment);
+      output(pipeline, "configurationVersion", snap.version);
+    } catch (Exception e) {
+      throw failure(e);
+    }

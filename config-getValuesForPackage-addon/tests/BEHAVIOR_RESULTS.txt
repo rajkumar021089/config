@@ -1,0 +1,159 @@
+PASS namespace input/output dimensions and Java fragment/source consistency
+Compiler options: -source 11 -target 11 -Xlint:-options
+PASS DSP lists config.cnf without legacy files
+PASS Config/config.cnf loads while malformed legacy files are ignored
+PASS explicit config.cnf lookup resolves
+PASS old manager settings cannot enable legacy sources
+PASS legacy-only package has no supported files
+PASS legacy-only keys do not enter JVM cache
+PASS direct legacy read rejected
+PASS direct legacy write rejected
+PASS snapshot contains no legacy source files
+PASS legacy file edits do not change configuration version
+PASS save and reload use config.cnf in uppercase Config folder
+PASS discovery includes NBK business packages only
+PASS existing NBK config.cnf auto-loaded without migration
+PASS lookup uses JVM snapshot without reading disk
+PASS reload activates existing NBK file changes
+PASS startup loads config.cnf
+PASS environment override wins
+PASS UTF-8 preserved
+PASS configured global fallback
+PASS ignoreGlobalValues suppresses fallback
+PASS legacy configFile no longer aliases config.cnf
+PASS Save leaves active cache unchanged
+PASS stale save rejected
+PASS reset activates saved value
+PASS restart loads saved files
+PASS package traversal rejected
+PASS file traversal rejected
+PASS unrelated file access rejected
+PASS symbolic link rejected
+PASS config file keeps encrypted handle syntax
+PASS secret file contains no plaintext
+PASS false returns handle reference
+PASS true returns plaintext
+PASS plaintext not cached by default
+PASS secret store rejects plaintext
+PASS bad config rejects reset
+PASS failed reset retains old snapshot
+PASS legacy import dry run is disabled
+PASS legacy import apply is disabled
+PASS disabled import never invokes a legacy service
+PASS legacy file remains untouched
+PASS manually added config secret resolves locally
+PASS wrapper input/output contract
+PASS service plaintext flag
+PASS missing suppression returns null
+PASS missing default throws
+PASS excluded interpolation flag rejected
+PASS public migration service is disabled
+PASS DSP migration action reports disabled
+PASS service and DSP routes never invoke legacy getValue
+PASS DSP cannot read a legacy file directly
+PASS reset without token denied
+PASS tampered token denied
+PASS anonymous runtime denied
+PASS anonymous admin denied
+PASS bulk response cannot mutate internal snapshot
+PASS bulk returns snapshot version
+PASS concurrent snapshot readers remain consistent during reset
+PASS explicit decrypted-cache option works
+PASS decrypted-cache lookup returns locally stored value
+PASS combined action reports configuration reloaded
+PASS combined action invokes built-in reset once
+PASS combined action publishes new configuration
+PASS configuration validation failure skips built-in reset
+PASS validation failure retains previous active configuration
+PASS built-in reset failure is reported as partial success
+PASS partial success preserves successful configuration reload
+PASS configuration-only reset remains separate
+PASS configured package prefix replaces NBK filter
+PASS configured folder and filename discovered
+PASS configured environment override loads
+PASS configured configFile lookup resolves
+PASS DSP receives configured filenames
+PASS unsafe configurable path rejected
+PASS invalid discovery settings retain active cache
+PASS reload restores configured defaults
+PASS status exposes running build ID
+PASS status exposes actual packages root
+PASS file diagnostics exposes actual search directory
+PASS unresolved secret does not block ordinary values
+PASS unresolved handle marker preserved
+PASS missing secret plaintext lookup fails closed
+PASS missing handle listed for manual entry
+PASS manual secret entry resolves after reload
+PASS manual handle marked configured
+PASS malformed legacy reference does not block unrelated values
+PASS malformed value retrieval fails closed
+PASS malformed reference inventory includes file and key only
+PASS direct encrypted update preserves configuration file
+PASS direct encrypted update rejects stale version
+PASS direct encrypted update activates after reload despite unrelated malformed value
+PASS single snapshot inventory includes all-package handles
+PASS snapshot inventory includes malformed diagnostics
+PASS snapshot inventory JSON reused across requests
+PASS inventory remains available with all package files offline
+PASS edit obtains current disk version on demand
+PASS reload builds a fresh snapshot inventory
+PASS manager key path works without wrapper property or environment variable
+TOTAL 98 checks passed
+PASS package-name-only request enumerates every active key
+PASS totalCount equals contents length
+PASS packageName returned for wrapper mapping
+PASS active environment returned
+PASS snapshot version returned
+PASS environment override is effective
+PASS inactive-only keys do not enter effective key results
+PASS global keys are excluded by default
+PASS no legacy file or service is read
+PASS empty string values preserved
+PASS Unicode values preserved
+PASS valueList is a String List without splitting values
+PASS interpolation tokens flagged and kept literal
+PASS ordinary value has no variable flag
+PASS per-key file details include inactive definitions
+PASS winning environment source identified
+PASS overridden base source stays active but is not effective
+PASS inactive environment source identified
+PASS raw source values retained
+PASS base source wins when there is no environment override
+PASS keys returned in deterministic order
+PASS simple wrapper keyValues has one pair per contents row
+PASS wrapper pairs use the same effective values
+PASS showPkg alias supports screenshot input naming
+PASS matching primary and alias inputs accepted
+PASS surrounding package-name whitespace trimmed
+PASS conflicting package-name inputs rejected
+PASS prefix list filters keys and ignores blank prefixes
+PASS known empty package returns empty document lists
+PASS global inclusion is explicit
+PASS global ownership marked
+PASS local keys override global collisions
+PASS direct global-package request has no duplicate keys
+PASS encrypted values return references by default
+PASS explicit reveal resolves local secret
+PASS source details preserve stored encrypted marker even when effective value is revealed
+PASS global secret resolves using its owning package
+PASS missing secret remains listable as a reference
+PASS missing plaintext secret fails closed
+PASS malformed secret is diagnostic data in default listing
+PASS malformed plaintext request fails closed
+PASS enumeration is not limited by existing 1000-key bulk API
+PASS uppercase Config folder supported
+PASS missing package name rejected
+PASS package traversal rejected
+PASS unknown package rejected even when globals exist
+PASS package outside configured load prefix rejected
+PASS invalid global flag rejected
+PASS invalid reveal flag rejected
+PASS anonymous caller denied
+PASS returned documents and arrays cannot mutate shared snapshot
+PASS saved disk changes await reload
+PASS reload atomically activates values and version
+PASS concurrent enumeration keeps values and sources in one snapshot
+PASS all values and file details remain available with package tree offline
+PASS secret reveal also uses captured snapshot without filesystem access
+PASS all enumeration scenarios invoke no legacy services
+TOTAL 57 package-value checks passed
